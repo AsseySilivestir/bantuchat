@@ -1,51 +1,41 @@
 # ─────────────────────────────────────────────────────────────────────
-#  BantuChat — Docker image (Ubuntu 22.04, builds Bantu from source)
+#  BantuChat — Docker image (pre-built Bantu v1.4.0 binary, ubuntu:24.04)
 #
-#  Produces a self-contained image that runs the BantuChat server
-#  (Bantu v1.4.0 interpreter + server.b) on port $PORT.
+#  No build step — the `bantu` interpreter (Bantu v1.4.0) is committed to
+#  the repo root and just COPYd into the image. This makes the Docker
+#  build instant + reliable on Render's free tier (no g++/cmake/libffi-dev
+#  toolchain to install, ~3 min of build time saved).
+#
+#  The binary is a dynamically-linked ELF x86-64 that needs glibc ≥ 2.38
+#  (built against glibc 2.38), which ubuntu:24.04 (glibc 2.39) provides.
 #
 #  Build:  docker build -t bantuchat .
 #  Run:    docker run -p 8080:8080 -e PORT=8080 -v bantuchat-data:/data bantuchat
 # ─────────────────────────────────────────────────────────────────────
 
-FROM ubuntu:22.04 AS builder
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV TZ=Africa/Dar_es_Salaam
-
-# Build deps: g++ (C++17), sqlite3 + curl dev headers, make, git (to clone Bantu), ca-certs
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential g++ gcc make git ca-certificates \
-        libsqlite3-dev libcurl4-openssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /build
-
-# Clone the Bantu v1.4.0 toolchain (interpreter source) and build the static binary.
-# v1.4.0 ships as a single ~3.8 MB binary with zero runtime deps beyond libsqlite3 + libcurl.
-RUN git clone --depth 1 --branch main https://github.com/AsseySilivestir/Bantu.git bantu-src \
-    && cd bantu-src/bantu-src/compiler \
-    && bash build.sh \
-    && cp build/bantu /usr/local/bin/bantu \
-    && bantu --version
-
-# ─────────────────────────────────────────────────────────────────────
-#  Runtime stage — small image, just the binary + the app + runtime libs
-# ─────────────────────────────────────────────────────────────────────
-FROM ubuntu:22.04 AS runtime
+FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Africa/Dar_es_Salaam
 ENV PORT=8080
 ENV UDP_PORT=4120
+ENV DB_PATH=/data/bantuchat.db
 
+# Runtime libs the bantu binary links against:
+#   libsqlite3-0  → libsqlite3.so.0
+#   libcurl4      → libcurl.so.4 (pulls libssl3/libcrypto3/libnghttp3/…)
+#   libffi8       → libffi.so.8
+#   libstdc++6    → libstdc++.so.6
+#   ca-certificates + sqlite3 (for the /data disk)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsqlite3-0 libcurl4 ca-certificates sqlite3 \
+        libsqlite3-0 libcurl4 libffi8 libstdc++6 \
+        ca-certificates sqlite3 \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /app/public /data
+    && mkdir -p /app/public /data && chmod 777 /data
 
-# Copy the freshly-built Bantu interpreter
-COPY --from=builder /usr/local/bin/bantu /usr/local/bin/bantu
+# Copy the pre-built Bantu v1.4.0 interpreter (committed to the repo)
+COPY bantu /usr/local/bin/bantu
+RUN chmod +x /usr/local/bin/bantu
 
 # Copy the app
 WORKDIR /app
@@ -53,11 +43,7 @@ COPY server.b /app/server.b
 COPY public/ /app/public/
 COPY bantu.json /app/bantu.json
 
-# SQLite database lives on a Render disk mounted at /data (persists across deploys)
-ENV DB_PATH=/data/bantuchat.db
-RUN mkdir -p /data && chmod 777 /data
-
-EXPOSE 8080 4120/udp
+EXPOSE 8080
 
 # Pre-flight check so Render logs show clearly if the binary can't run
 RUN ldd /usr/local/bin/bantu && /usr/local/bin/bantu --version
