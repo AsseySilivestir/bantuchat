@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#075E54" />
+  <title>BantuChat</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>" />
+  <link rel="stylesheet" href="/css/style.css" />
+  <!-- CodeMirror 5 (CDN — used by Editor view) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/javascript/javascript.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/xml/xml.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/shell/shell.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/go/go.min.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="app-grid" id="app-grid">
+      <!-- LEFT: Sidebar -->
+      <aside class="sidebar" id="sidebar" aria-label="Navigation sidebar">
+        <div class="sidebar-header">
+          <button class="hamburger" id="hamburger" aria-label="Menu">☰</button>
+          <div class="me" id="me-row" role="button" tabindex="0" aria-label="Open your profile">
+            <div id="me-avatar"></div>
+            <span class="me-name" id="me-name">…</span>
+          </div>
+          <button class="hbtn" id="btn-status-new" title="New status" aria-label="New status">⨯</button>
+          <button class="hbtn" id="btn-logout" title="Logout" aria-label="Logout">⏻</button>
+        </div>
+
+        <div class="tabs-row" role="tablist" aria-label="Main views">
+          <button class="tab active" data-view="chats" role="tab" aria-selected="true">
+            <span class="tab-icon" aria-hidden="true">💬</span><span>Chats</span>
+          </button>
+          <button class="tab" data-view="status" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">⬡</span><span>Status</span>
+          </button>
+          <button class="tab" data-view="calls" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">📞</span><span>Calls</span>
+          </button>
+          <button class="tab" data-view="editor" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">📝</span><span>Editor</span>
+          </button>
+          <button class="tab" data-view="profile" role="tab" aria-selected="false">
+            <span class="tab-icon" aria-hidden="true">⚙</span><span>Profile</span>
+          </button>
+        </div>
+
+        <!-- Sidebar body — swapped per active view -->
+        <div class="sidebar-body" id="sidebar-body">
+          <!-- chat list / status rings / call list / editor session list / profile subnav -->
+        </div>
+      </aside>
+
+      <!-- RIGHT: Main pane -->
+      <main class="main-pane" id="main-pane" aria-label="Main content">
+        <div class="main-pane-header" id="main-header">
+          <button class="back-btn" id="back-btn" aria-label="Back to list">‹</button>
+          <div id="main-header-avatar"></div>
+          <div class="peer-info">
+            <div class="peer-name" id="main-header-title">Select a chat</div>
+            <div class="peer-status" id="main-header-sub"></div>
+          </div>
+          <div class="spacer"></div>
+          <div id="main-header-actions"></div>
+          <span class="conn-indicator connecting" id="conn-indicator" title="Connecting…"></span>
+        </div>
+
+        <div class="pane-content" id="pane-content" style="flex:1; display:flex; flex-direction:column; min-height:0; overflow:hidden;">
+          <div class="empty-state" id="pane-empty">
+            <div class="icon" aria-hidden="true">💬</div>
+            <h3>Welcome to BantuChat</h3>
+            <p>Select a chat on the left or start a new conversation.</p>
+            <div class="sub">All messages are end-to-end relayed via the Bantu WS server.</div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Toast host -->
+    <div class="toast-host" id="toast-host" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Generic modal -->
+    <div class="modal-backdrop" id="modal-backdrop" aria-hidden="true">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h3 id="modal-title">Title</h3>
+        <div class="modal-body" id="modal-body">Body</div>
+        <div class="modal-foot" id="modal-foot"></div>
+      </div>
+    </div>
+
+    <!-- Call modal -->
+    <div class="call-modal" id="call-modal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Voice call">
+      <div class="call-avatar" id="call-avatar">👤</div>
+      <div class="call-name" id="call-name">…</div>
+      <div class="call-state" id="call-state">calling…</div>
+      <div class="call-actions" id="call-actions">
+        <button class="call-btn mute" id="call-mute" aria-label="Mute">🎤</button>
+        <button class="call-btn hangup" id="call-hangup" aria-label="Hang up">📞</button>
+      </div>
+    </div>
+
+    <!-- Status viewer -->
+    <div class="status-viewer" id="status-viewer" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Status viewer">
+      <div class="progress"><div class="bar" id="status-bar"></div></div>
+      <div class="sv-head">
+        <div id="sv-avatar"></div>
+        <div>
+          <div class="name" id="sv-name">…</div>
+          <div class="time" id="sv-time"></div>
+        </div>
+        <button class="sv-close" id="sv-close" aria-label="Close viewer">✕</button>
+      </div>
+      <div class="sv-body" id="sv-body"></div>
+      <button class="sv-nav left" id="sv-prev" aria-label="Previous"></button>
+      <button class="sv-nav right" id="sv-next" aria-label="Next"></button>
+    </div>
+  </div>
+
+  <!-- Apply persisted theme -->
+  <script>
+    (function() {
+      try {
+        var t = localStorage.getItem('bantu_theme');
+        if (t === 'dark' || (t == null && matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.body.classList.add('dark');
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <!-- App modules, plain scripts in dependency order. Globals: App, Chat, Call, Editor, Status, Profile -->
+  <script src="/js/app.js" defer></script>
+  <script src="/js/chat.js" defer></script>
+  <script src="/js/call.js" defer></script>
+  <script src="/js/editor.js" defer></script>
+  <script src="/js/status.js" defer></script>
+  <script src="/js/profile.js" defer></script>
+</body>
+</html>

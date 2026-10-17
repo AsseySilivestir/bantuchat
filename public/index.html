@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#075E54" />
+  <title>BantuChat — Sign In</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💬</text></svg>" />
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-topbar" aria-hidden="true"></div>
+
+    <header class="auth-hero">
+      <div class="logo" aria-hidden="true">💬</div>
+      <h1>BantuChat</h1>
+      <p>Secure messaging, voice, code &amp; more — built on the Bantu runtime.</p>
+    </header>
+
+    <main class="auth-card" role="main" aria-label="Authentication">
+      <div class="auth-tabs" role="tablist" aria-label="Auth mode">
+        <button class="auth-tab active" id="tab-login" role="tab" aria-selected="true" aria-controls="pane-login">Sign In</button>
+        <button class="auth-tab" id="tab-register" role="tab" aria-selected="false" aria-controls="pane-register">Create Account</button>
+      </div>
+
+      <div class="auth-body">
+        <div class="auth-error" id="auth-error" role="alert" aria-live="assertive"></div>
+
+        <!-- LOGIN PANE -->
+        <form class="auth-pane active" id="pane-login" role="tabpanel" aria-labelledby="tab-login" autocomplete="on">
+          <div class="field">
+            <label for="login-username">Username</label>
+            <input id="login-username" name="username" type="text" autocomplete="username"
+                   placeholder="your_username" required minlength="3" />
+          </div>
+          <div class="field">
+            <label for="login-password">Password</label>
+            <input id="login-password" name="password" type="password" autocomplete="current-password"
+                   placeholder="••••••••" required minlength="6" />
+          </div>
+          <button type="submit" class="btn block" id="login-submit">
+            <span class="spinner"></span><span class="label">Sign In</span>
+          </button>
+          <p style="margin:14px 0 0; text-align:center; font-size:13px; color:var(--text-secondary)">
+            New here? <a href="#" id="goto-register">Create an account</a>
+          </p>
+        </form>
+
+        <!-- REGISTER PANE -->
+        <form class="auth-pane" id="pane-register" role="tabpanel" aria-labelledby="tab-register" autocomplete="on">
+          <div class="field">
+            <label for="reg-name">Display name</label>
+            <input id="reg-name" name="name" type="text" autocomplete="name"
+                   placeholder="Jane Doe" required />
+          </div>
+          <div class="field">
+            <label for="reg-username">Username</label>
+            <input id="reg-username" name="username" type="text" autocomplete="username"
+                   placeholder="jane_doe" required minlength="3" />
+            <div class="hint">Letters, numbers, underscore — min 3 chars.</div>
+          </div>
+          <div class="field">
+            <label for="reg-password">Password</label>
+            <input id="reg-password" name="password" type="password" autocomplete="new-password"
+                   placeholder="At least 6 characters" required minlength="6" />
+          </div>
+          <button type="submit" class="btn block" id="register-submit">
+            <span class="spinner"></span><span class="label">Create Account</span>
+          </button>
+          <p style="margin:14px 0 0; text-align:center; font-size:13px; color:var(--text-secondary)">
+            Already have an account? <a href="#" id="goto-login">Sign in</a>
+          </p>
+        </form>
+      </div>
+    </main>
+
+    <footer class="auth-foot">
+      BantuChat • Powered by Bantu v1.4.0 • <a href="/api/health" style="color:#fff;text-decoration:underline">health</a>
+    </footer>
+  </div>
+
+  <script>
+    // Apply persisted theme early to avoid flash
+    (function() {
+      try {
+        var t = localStorage.getItem('bantu_theme');
+        if (t === 'dark' || (t == null && matchMedia('(prefers-color-scheme: dark)').matches)) {
+          document.body.classList.add('dark');
+        }
+      } catch (e) {}
+    })();
+  </script>
+  <script>
+    // ----- Auth page logic (inline, vanilla) -----
+    // Token keys must match app.js:
+    const TOKEN_KEY = 'bantu_token';
+    const USER_KEY  = 'bantu_user';
+
+    // If already authed, skip ahead
+    try {
+      if (localStorage.getItem(TOKEN_KEY)) {
+        location.href = '/app';
+      }
+    } catch (e) {}
+
+    const tabs = { login: document.getElementById('tab-login'),
+                   register: document.getElementById('tab-register') };
+    const panes = { login: document.getElementById('pane-login'),
+                    register: document.getElementById('pane-register') };
+
+    function showTab(which) {
+      Object.keys(tabs).forEach(k => {
+        const on = k === which;
+        tabs[k].classList.toggle('active', on);
+        tabs[k].setAttribute('aria-selected', on ? 'true' : 'false');
+        panes[k].classList.toggle('active', on);
+      });
+      hideError();
+      document.getElementById(which + '-submit').classList.remove('loading');
+    }
+    tabs.login.addEventListener('click', () => showTab('login'));
+    tabs.register.addEventListener('click', () => showTab('register'));
+    document.getElementById('goto-register').addEventListener('click', e => { e.preventDefault(); showTab('register'); });
+    document.getElementById('goto-login').addEventListener('click', e => { e.preventDefault(); showTab('login'); });
+
+    const errBox = document.getElementById('auth-error');
+    function showError(msg) { errBox.textContent = msg || ''; errBox.classList.toggle('show', !!msg); }
+    function hideError() { errBox.classList.remove('show'); errBox.textContent = ''; }
+
+    function setLoading(btn, loading) {
+      btn.classList.toggle('loading', loading);
+      btn.disabled = loading;
+    }
+
+    async function postJSON(path, body) {
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const ct = res.headers.get('content-type') || '';
+      const data = ct.includes('json') ? await res.json() : { _text: await res.text() };
+      if (!res.ok) {
+        const msg = (data && (data.error || data.message)) || ('HTTP ' + res.status);
+        const err = new Error(msg);
+        err.data = data;
+        err.status = res.status;
+        throw err;
+      }
+      return data;
+    }
+
+    // LOGIN
+    document.getElementById('pane-login').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('login-submit');
+      hideError();
+      setLoading(btn, true);
+      try {
+        const username = document.getElementById('login-username').value.trim();
+        const password = document.getElementById('login-password').value;
+        const r = await postJSON('/api/auth/login', { username, password });
+        if (!r.token) throw new Error('No token returned');
+        localStorage.setItem(TOKEN_KEY, r.token);
+        localStorage.setItem(USER_KEY, JSON.stringify(r.user || {}));
+        location.href = '/app';
+      } catch (err) {
+        showError(err.message || 'Sign-in failed');
+      } finally {
+        setLoading(btn, false);
+      }
+    });
+
+    // REGISTER
+    document.getElementById('pane-register').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('register-submit');
+      hideError();
+      setLoading(btn, true);
+      try {
+        const name = document.getElementById('reg-name').value.trim();
+        const username = document.getElementById('reg-username').value.trim();
+        const password = document.getElementById('reg-password').value;
+        const r = await postJSON('/api/auth/register', { name, username, password });
+        if (!r.token) throw new Error('No token returned');
+        localStorage.setItem(TOKEN_KEY, r.token);
+        localStorage.setItem(USER_KEY, JSON.stringify(r.user || {}));
+        location.href = '/app';
+      } catch (err) {
+        showError(err.message || 'Registration failed');
+      } finally {
+        setLoading(btn, false);
+      }
+    });
+
+    // Enter-key on password fields submits the right form (handled natively by <form>)
+  </script>
+</body>
+</html>

@@ -1,0 +1,39 @@
+# Render.com blueprint for BantuChat
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: push this repo to GitHub, then in Render:
+#   New → Blueprint → pick this repo → Apply. Render reads render.yaml.
+#
+# What it provisions:
+#   - one web service (the BantuChat HTTP+WS+UDP server, Docker runtime)
+#   - one 1 GB persistent disk mounted at /data (SQLite DB survives deploys + free-tier reboots)
+#
+# Free-tier notes:
+#   - free web services sleep after 15 min idle (first request after sleep takes ~30s to wake)
+#   - the 1 GB disk keeps your chats even across sleeps + redeploys
+#   - UDP is for voice relay; Render's free HTTP service exposes only TCP:443,
+#     so the UDP voice relay is best-effort (the WS binary voice path works through the HTTP port)
+
+services:
+  - type: web
+    name: bantuchat
+    runtime: docker
+    plan: free
+    region: ohio                       # or frankfurt / singapore / oregon
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: UDP_PORT
+        value: 4120
+      - key: DB_PATH
+        value: /data/bantuchat.db
+      - key: TZ
+        value: Africa/Dar_es_Salaam
+    disk:
+      name: bantuchat-data
+      mountPath: /data
+      sizeGB: 1

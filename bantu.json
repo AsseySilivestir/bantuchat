@@ -1,0 +1,10 @@
+{
+  "name": "bantuchat",
+  "version": "1.4.0",
+  "entry": "server.b",
+  "template": "web",
+  "language": "bantu",
+  "bantuVersion": "1.4.0",
+  "description": "A WhatsApp-style chat built in Bantu v1.4.0 using sua.server (HTTP), sua.ws (WebSocket) and sua.udp (voice relay).",
+  "dependencies": {}
+}

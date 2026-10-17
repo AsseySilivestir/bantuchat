@@ -1,0 +1,13 @@
+*.db
+*.db-wal
+*.db-shm
+node_modules/
+.env
+.env.local
+*.log
+dist/
+release/
+.DS_Store
+__pycache__/
+*.swp
+.vscode/
