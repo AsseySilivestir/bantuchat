@@ -82,18 +82,22 @@
     }
   }
 
-  // Flush any ICE candidates that arrived before createPeerConnection()
-  // finished. Without this, those candidates are silently lost and ICE
-  // may never complete (or only one direction's path gets established,
-  // which is exactly the "one-way audio" symptom).
-  function flushPendingIce() {
-    if (!Call.state.pc) return;
+  // Flush any ICE candidates that arrived before the PC was ready
+  // (PC was null, OR remoteDescription was null because the offer hadn't
+  // arrived yet). Both preconditions must be met before addIceCandidate
+  // can be called without throwing InvalidStateError.
+  async function flushPendingIce() {
+    if (!canApplyIce()) return;
     const pending = Call.state.pendingIce || [];
     Call.state.pendingIce = [];
     for (const c of pending) {
+      if (!c) continue;
       try {
-        if (c) Call.state.pc.addIceCandidate(new RTCIceCandidate(c));
-      } catch (e) { /* non-fatal */ }
+        await Call.state.pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) {
+        // ICE errors are non-fatal — log to console for debugging
+        console.warn('[call] flush addIceCandidate failed:', e.message);
+      }
     }
   }
 
@@ -144,8 +148,10 @@
     Call.state.localStream.getTracks().forEach(t => {
       try { Call.state.pc.addTrack(t, Call.state.localStream); } catch {}
     });
-    // If any ICE candidates arrived while we were setting up, flush them now.
-    flushPendingIce();
+    // Note: do NOT flush pending ICE here — as the caller, we haven't
+    // received the answer yet, so remoteDescription is null.
+    // flushPendingIce() is called in the call_answer handler after
+    // setRemoteDescription(answer) completes.
 
     // Create offer
     try {
@@ -286,10 +292,16 @@
       }
       await createPeerConnection();
       Call.state.localStream.getTracks().forEach(t => Call.state.pc.addTrack(t, Call.state.localStream));
-      flushPendingIce();
+      // Note: do NOT flush pending ICE here — remoteDescription is null
+      // until setRemoteDescription() below. The flush happens after.
     }
     try {
       await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      // Flush any ICE candidates that arrived before the offer was set.
+      // Without this, candidates buffered when remoteDescription was null
+      // are silently dropped — exactly the symptom reported (one-way
+      // audio because ICE only completes in one direction).
+      await flushPendingIce();
       const ans = await Call.state.pc.createAnswer();
       await Call.state.pc.setLocalDescription(ans);
       App.wsSend({ type: 'call_answer', callId: msg.callId, peerId: msg.fromUserId, sdp: ans });
@@ -303,23 +315,65 @@
     if (!Call.state.pc) return;
     try {
       await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+      // Flush any ICE candidates that arrived before the answer was set.
+      await flushPendingIce();
     } catch (e) {
       App.toast('Failed to set remote answer: ' + e.message, 'error');
     }
   });
 
+  // ==========================================================
+  // ICE candidate buffering
+  //
+  // WebRTC's RTCPeerConnection.addIceCandidate() has TWO preconditions:
+  //   1. A PC must exist (we created one in createPeerConnection)
+  //   2. remoteDescription must be set (the caller's offer must have been
+  //      applied via setRemoteDescription)
+  //
+  // The previous code only checked condition #1. When the caller's
+  // ICE gathering finished BEFORE the offer arrived (a common network
+  // race — UDP candidate frames can overtake the WebSocket offer frame),
+  // the callee would receive `call_ice` after creating the PC but before
+  // setting the remote description, then call `addIceCandidate(c)` on
+  // a PC with `remoteDescription === null` → InvalidStateError, which
+  // surfaced in the console as:
+  //
+  //   "Failed to execute 'addIceCandidate' on 'RTCPeerConnection':
+  //    The remote description was null"
+  //
+  // The fix: also buffer candidates when remoteDescription is null,
+  // and flush them after setRemoteDescription() completes.
+  // ==========================================================
+  function bufferIceCandidate(candidate) {
+    if (!candidate) return;
+    Call.state.pendingIce = Call.state.pendingIce || [];
+    Call.state.pendingIce.push(candidate);
+  }
+
+  function canApplyIce() {
+    const pc = Call.state.pc;
+    if (!pc) return false;
+    // The spec says addIceCandidate can be called after setLocalDescription
+    // on the answerer side too, BUT in practice some browsers refuse if
+    // remoteDescription is null. We require remoteDescription to be set.
+    if (!pc.remoteDescription || pc.remoteDescription.type === '') return false;
+    return true;
+  }
+
   App.registerWSHandler('call_ice', async (msg) => {
     if (!Call.state.callId || msg.callId !== Call.state.callId) return;
-    if (!Call.state.pc) {
-      // Buffer until pc is up
-      Call.state.pendingIce = Call.state.pendingIce || [];
-      Call.state.pendingIce.push(msg.candidate);
+    if (!msg.candidate) return;
+    // Buffer if PC is null OR remoteDescription is null
+    if (!canApplyIce()) {
+      bufferIceCandidate(msg.candidate);
       return;
     }
     try {
-      const c = msg.candidate ? new RTCIceCandidate(msg.candidate) : null;
-      if (c) await Call.state.pc.addIceCandidate(c);
-    } catch (e) { /* ICE errors are non-fatal */ }
+      await Call.state.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+    } catch (e) {
+      // ICE errors are non-fatal — log to console for debugging
+      console.warn('[call] addIceCandidate failed:', e.message);
+    }
   });
 
   App.registerWSHandler('call_end', (msg) => {
@@ -352,8 +406,9 @@
     Call.state.accepted = true;       // mark BEFORE creating PC so the offer handler knows
     await createPeerConnection();
     Call.state.localStream.getTracks().forEach(t => Call.state.pc.addTrack(t, Call.state.localStream));
-    // Apply any ICE candidates that arrived while we were setting up.
-    flushPendingIce();
+    // Note: we do NOT call flushPendingIce() here because remoteDescription
+    // is still null at this point (the offer hasn't been applied yet).
+    // flushPendingIce() is called AFTER setRemoteDescription() below.
 
     // If we already received the offer (it was buffered in pendingOffer),
     // process it now: set remote desc, create answer, send it.
@@ -362,6 +417,11 @@
       Call.state.pendingOffer = null;
       try {
         await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        // Flush any ICE candidates that arrived while remoteDescription
+        // was null. This is THE critical fix for the InvalidStateError
+        // ("The remote description was null") — candidates buffered
+        // before the offer was set are now applied.
+        await flushPendingIce();
         const ans = await Call.state.pc.createAnswer();
         await Call.state.pc.setLocalDescription(ans);
         App.wsSend({ type: 'call_answer', callId: msg.callId, peerId: msg.fromUserId, sdp: ans });
