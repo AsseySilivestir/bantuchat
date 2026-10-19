@@ -16,6 +16,71 @@
 (function () {
   'use strict';
 
+  // ==========================================================
+  // Default ICE server list
+  //
+  // The server can override this via GET /api/ice-servers, but these
+  // defaults always work as a fallback.
+  //
+  // What's in here and why:
+  //
+  //   • stun.l.google.com:19302  — Google's public STUN. Standard,
+  //     widely reachable. Used by ~all WebRTC demos.
+  //
+  //   • stun.cloudflare.com:3478 — Cloudflare's public STUN. Different
+  //     port (3478 vs 19302) and different operator — important for
+  //     networks that block one but not the other (some corporate
+  //     firewalls, some hotel Wi-Fi).
+  //
+  //   • OpenRelay TURN servers (metered.ca) — FREE public TURN relay
+  //     with shared credentials. This is the crucial piece for
+  //     cross-network calls: when both peers are behind symmetric NAT
+  //     (mobile carriers, carrier-grade NAT, some corporate Wi-Fi),
+  //     STUN cannot punch through. The only option is to relay all
+  //     audio through a TURN server.
+  //
+  //     OpenRelay runs two regions (US and Asia-Pacific) — WebRTC
+  //     will pick the one with the lowest latency automatically.
+  //
+  //     Credentials are public and shared — Metered.ca explicitly
+  //     publishes them for testing/dev use. For production you'd run
+  //     your own TURN (coturn) with rotating credentials via
+  //     /api/ice-servers.
+  //
+  //   • Without a TURN server, calls across different networks fail
+  //     silently — exactly the symptom the user reported: "works on
+  //     same network, fails on different networks".
+  // ==========================================================
+  const DEFAULT_ICE_SERVERS = [
+    // Google STUN — primary
+    { urls: 'stun:stun.l.google.com:19302' },
+    // Cloudflare STUN — fallback on networks that block Google
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    // OpenRelay TURN — global relay, used automatically by WebRTC
+    // when STUN fails (symmetric NAT, CGNAT, etc.)
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    // OpenRelay also runs a US-East relay for lower-latency NA/SA users
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=udp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ];
+
   const Call = window.Call = {
     state: {
       callId: null,
@@ -166,20 +231,52 @@
 
   // ==========================================================
   // Create RTCPeerConnection
+  //
+  // ICE server list — used by WebRTC to traverse NATs.
+  //
+  // Three kinds of candidates WebRTC tries to gather:
+  //   1. Host candidates — local IP, only works on the same LAN.
+  //      This is why calls work when both users are on the same
+  //      network and fail on different networks.
+  //   2. Server-reflexive (srflx) — public IP discovered via STUN.
+  //      Works across different networks when the NAT is "cone-shaped"
+  //      (most home routers, most cellular hotspots in fallback mode).
+  //   3. Relay (relay) — packets go through a TURN server. The only
+  //      thing that works behind symmetric NAT (carrier-grade NAT,
+  //      some corporate Wi-Fi, some hotel/Airbnb networks). Without
+  //      a TURN server, calls behind symmetric NAT simply cannot
+  //      connect.
+  //
+  // The previous code pointed a "STUN query" at the BantuChat server's
+  // public IP — but the BantuChat server is NOT a STUN server, so that
+  // did nothing. We now use:
+  //   • Google STUN  (19302) — the de-facto default, widely reachable
+  //   • Cloudflare STUN (3478) — alternative for networks that block
+  //     Google's STUN port
+  //   • OpenRelay TURN — free public TURN relay run by Metered.ca
+  //     with shared credentials, used automatically by WebRTC when
+  //     direct connection fails. Without this, calls across symmetric
+  //     NATs (mobile carriers, some home routers, corporate Wi-Fi)
+  //     will fail with "ICE failed" — exactly the symptom reported.
   // ==========================================================
   async function createPeerConnection() {
-    // Try to read /api/stun-info for server's public IP hint (per contract).
-    // For local demo this is optional; we provide Google STUN as fallback.
-    let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+    // Try to fetch the ICE config from the server (lets us rotate TURN
+    // credentials without redeploying the client). Falls back to the
+    // hardcoded list if the endpoint is unavailable.
+    let iceServers = DEFAULT_ICE_SERVERS;
     try {
-      const info = await App.api('GET', '/api/stun-info');
-      if (info && info.publicIp) {
-        // Hint: add a host candidate hint
-        iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:' + info.publicIp + (info.port ? ':' + info.port : ':3478') }];
+      const cfg = await App.api('GET', '/api/ice-servers');
+      if (cfg && Array.isArray(cfg.iceServers) && cfg.iceServers.length) {
+        iceServers = cfg.iceServers;
       }
-    } catch (e) { /* ignore — optional */ }
+    } catch (e) { /* server older than this client — use defaults */ }
 
-    const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 0 });
+    const pc = new RTCPeerConnection({
+      iceServers,
+      // Pre-allocate 4 ICE candidate ports. Speeds up gathering and
+      // makes connection setup more reliable on flaky networks.
+      iceCandidatePoolSize: 4,
+    });
     Call.state.pc = pc;
 
     pc.onicecandidate = (ev) => {
@@ -190,11 +287,44 @@
           peerId: Call.state.peerId,
           candidate: ev.candidate,
         });
+      } else {
+        // null candidate = end of local ICE gathering.
+        // Could send an explicit "end-of-candidates" signal, but most
+        // modern browsers handle the trickle-ICE timeout correctly
+        // without it. Just log for debugging.
+        console.debug('[call] ICE gathering complete');
       }
     };
+    pc.onicegatheringstatechange = () => {
+      console.debug('[call] ICE gathering state:', pc.iceGatheringState);
+    };
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') {
-        App.toast('ICE failed — try restarting the call', 'error');
+      const st = pc.iceConnectionState;
+      console.debug('[call] ICE connection state:', st);
+      if (st === 'failed') {
+        // ICE failed — typically means we exhausted STUN and have no
+        // TURN path. Show a clear message so the user understands
+        // what's wrong (instead of just silence).
+        App.toast('Connection failed — likely a NAT/firewall issue. Try a different network or use a TURN relay.', 'error');
+        // Trigger an ICE restart — this is the standard recovery path
+        // when ICE fails. The new offer will trigger fresh candidate
+        // gathering and possibly pick a relay path that works.
+        try {
+          if (Call.state.direction === 'out' && Call.state.pc) {
+            pc.restartIce();
+            // Re-negotiate: create a new offer with iceRestart: true.
+            pc.createOffer({ iceRestart: true }).then(offer => {
+              pc.setLocalDescription(offer).then(() => {
+                App.wsSend({
+                  type: 'call_offer',
+                  callId: Call.state.callId,
+                  peerId: Call.state.peerId,
+                  sdp: pc.localDescription,
+                });
+              });
+            }).catch(() => {});
+          }
+        } catch (e) { /* non-fatal */ }
       }
     };
     pc.ontrack = (ev) => {

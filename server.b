@@ -904,6 +904,43 @@ sua.server.get("/api/stun-info", def($req, $res) {
     $res.json($stunInfo);
 });
 
+// ICE server list for WebRTC — clients call this to get the STUN+TURN
+// config. Lets us rotate TURN credentials server-side without
+// redeploying the client.
+//
+// IMPORTANT for cross-network calls: this MUST include at least one
+// TURN server (relay). Without TURN, calls fail silently when both
+// peers are behind symmetric NAT (carrier-grade NAT, mobile carriers,
+// some corporate Wi-Fi, hotel/Airbnb networks). STUN alone only works
+// for "cone" NATs (most home routers).
+//
+// The OpenRelay credentials below are public and shared by Metered.ca
+// for testing/development. For production: run your own coturn server
+// with rotating per-user credentials.
+sua.server.get("/api/ice-servers", def($req, $res) {
+    $res.json({
+        "iceServers": [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun.cloudflare.com:3478"},
+            {
+                "urls": "turn:openrelay.metered.ca:80",
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443",
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443?transport=tcp",
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            }
+        ]
+    });
+});
+
 // ─── Static files + entry routes ─────────────────────────────────
 sua.server.static("./public");
 
