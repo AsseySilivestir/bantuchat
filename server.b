@@ -388,8 +388,22 @@ sua.ws.on("message", def($m) {
                 }
                 if ($op.type == "delete") {
                     $pos = num($op.pos);
-                    $cnt = num($op.count);
-                    if ($cnt == 0 || $cnt == null) { $cnt = 1; }
+                    // The client sends `op.text` = the removed text
+                    // (string). We delete by the LENGTH of that text so
+                    // the server's cached content stays in sync with
+                    // what clients have. The previous code read
+                    // `op.count` (which was never sent) and defaulted
+                    // to 1, causing the server's content to diverge
+                    // from clients' content after the first delete —
+                    // which broke live sync for any user who joined
+                    // later and got the stale server content.
+                    $cnt = 0;
+                    if ($op.text != null) {
+                        $cnt = len(str($op.text));
+                    } else if ($op.count != null) {
+                        $cnt = num($op.count);
+                    }
+                    if ($cnt == 0) { $cnt = 1; }
                     $pre = substr($sess.content, 0, $pos);
                     $post = substr($sess.content, $pos + $cnt, len($sess.content) - ($pos + $cnt));
                     $sess.content = $pre + $post;

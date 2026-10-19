@@ -30,9 +30,72 @@
       timerInterval: null,
       muted: false,
       speaker: true,
-      pendingOffer: null,
+      pendingOffer: null,      // buffered SDP offer that arrived before user clicked Accept
+      pendingIce: [],          // buffered ICE candidates that arrived before PC was created
+      accepted: false,         // has the callee clicked Accept (or caller has SendOffer)?
     },
   };
+
+  // ==========================================================
+  // Audio element — created ONCE and attached to <body> so the
+  // browser's autoplay policy doesn't block remote audio playback.
+  // Some browsers (Chrome, Edge) refuse to play <audio> elements
+  // that are not in the DOM tree, even after a user gesture.
+  // ==========================================================
+  function ensureAudioElement() {
+    if (Call.state.audioEl && document.body.contains(Call.state.audioEl)) {
+      return Call.state.audioEl;
+    }
+    const el = document.createElement('audio');
+    el.autoplay = true;
+    el.setAttribute('playsinline', 'true');
+    el.style.position = 'fixed';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0';
+    el.style.pointerEvents = 'none';
+    el.style.left = '-9999px';
+    document.body.appendChild(el);
+    Call.state.audioEl = el;
+    return el;
+  }
+
+  // Try to play the remote audio. If autoplay is blocked (no recent
+  // user gesture), retry on the next user interaction.
+  function playRemoteAudio() {
+    const el = Call.state.audioEl;
+    if (!el || !el.srcObject) return;
+    const p = el.play();
+    if (p && typeof p.then === 'function') {
+      p.catch(() => {
+        // Autoplay blocked — retry on next user gesture.
+        const retry = () => {
+          el.play().catch(() => {});
+          document.removeEventListener('click', retry);
+          document.removeEventListener('touchstart', retry);
+          document.removeEventListener('keydown', retry);
+        };
+        document.addEventListener('click', retry, { once: true });
+        document.addEventListener('touchstart', retry, { once: true });
+        document.addEventListener('keydown', retry, { once: true });
+      });
+    }
+  }
+
+  // Flush any ICE candidates that arrived before createPeerConnection()
+  // finished. Without this, those candidates are silently lost and ICE
+  // may never complete (or only one direction's path gets established,
+  // which is exactly the "one-way audio" symptom).
+  function flushPendingIce() {
+    if (!Call.state.pc) return;
+    const pending = Call.state.pendingIce || [];
+    Call.state.pendingIce = [];
+    for (const c of pending) {
+      try {
+        if (c) Call.state.pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) { /* non-fatal */ }
+    }
+  }
 
   // ==========================================================
   // Initiate outgoing call
@@ -42,7 +105,12 @@
     Call.state.direction = 'out';
     Call.state.peerId = peerId;
     Call.state.peerName = peerName || 'Unknown';
+    Call.state.accepted = true;       // caller implicitly "accepted" the call
     showCallModal({ incoming: false });
+
+    // Pre-create the audio element so it's in the DOM and ready when
+    // the remote track arrives (avoids autoplay-policy issues).
+    ensureAudioElement();
 
     // Ask server to create call row + signal the peer
     let callId = null;
@@ -76,6 +144,8 @@
     Call.state.localStream.getTracks().forEach(t => {
       try { Call.state.pc.addTrack(t, Call.state.localStream); } catch {}
     });
+    // If any ICE candidates arrived while we were setting up, flush them now.
+    flushPendingIce();
 
     // Create offer
     try {
@@ -122,12 +192,26 @@
       }
     };
     pc.ontrack = (ev) => {
-      Call.state.remoteStream = ev.streams[0];
-      const audio = Call.state.audioEl || document.createElement('audio');
-      audio.autoplay = true;
-      audio.srcObject = ev.streams[0];
-      Call.state.audioEl = audio;
-      audio.play().catch(() => {});
+      // Use the persistent audio element (already in <body>) so autoplay
+      // works. Some browsers refuse to play detached <audio> elements
+      // and silently drop the audio — exactly the "one-way audio"
+      // symptom the user reported.
+      const audio = ensureAudioElement();
+      // Build a fresh MediaStream if the event has none (some Chrome versions
+      // fire ontrack with ev.streams[0] === undefined but ev.track set).
+      let stream = ev.streams && ev.streams[0];
+      if (!stream) {
+        stream = new MediaStream();
+        if (ev.track) stream.addTrack(ev.track);
+      }
+      Call.state.remoteStream = stream;
+      audio.srcObject = stream;
+      // Explicitly unmute (speaker button state).
+      audio.muted = false;
+      audio.volume = Call.state.speaker ? 1 : 0;
+      // Try to play. If autoplay blocks it, the helper will retry on the
+      // next user gesture (the Accept button counts as a gesture).
+      playRemoteAudio();
     };
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected' && Call.state.timerStart === null) {
@@ -162,37 +246,47 @@
 
   App.registerWSHandler('call_offer', async (msg) => {
     if (!Call.state.callId || msg.callId !== Call.state.callId) {
-      // Spontaneous offer — accept it (we may have missed call_incoming)
+      // Spontaneous offer — we missed the call_incoming (or the server
+      // didn't send one). Set up state and show the incoming call modal
+      // so the USER can choose to accept or reject — we must NOT
+      // auto-answer, because doing so would (a) create a PC before the
+      // user has granted mic permission, (b) trigger autoplay-policy
+      // violations for the remote audio, and (c) result in the user
+      // clicking Accept later, which would create a SECOND PC and
+      // break the audio path negotiated by the first one.
       Call.state.callId = msg.callId;
       Call.state.peerId = msg.fromUserId;
       Call.state.direction = 'in';
+      Call.state.accepted = false;
       try {
         const u = await App.api('GET', '/api/users/' + msg.fromUserId);
         Call.state.peerName = (u && (u.name || u.username)) || 'Caller';
       } catch { Call.state.peerName = 'Caller'; }
-      // Need local audio before we can answer
-      if (!Call.state.localStream) {
-        try { Call.state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-        catch (e) { App.wsSend({ type: 'call_reject', callId: msg.callId }); return; }
-      }
-      showCallModal({ incoming: false });
-      await createPeerConnection();
-      Call.state.localStream.getTracks().forEach(t => Call.state.pc.addTrack(t, Call.state.localStream));
-      await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-      const ans = await Call.state.pc.createAnswer();
-      await Call.state.pc.setLocalDescription(ans);
-      App.wsSend({ type: 'call_answer', callId: msg.callId, peerId: msg.fromUserId, sdp: ans });
+      // Buffer the offer; acceptIncoming will process it.
+      Call.state.pendingOffer = msg;
+      showCallModal({ incoming: true });
       return;
     }
 
-    // We are the caller? No, caller doesn't receive offers. We must be the callee.
+    // If we got here, the callId matches. Are we the callee (direction=in)
+    // who hasn't clicked Accept yet? Buffer the offer.
+    if (Call.state.direction === 'in' && !Call.state.accepted) {
+      Call.state.pendingOffer = msg;
+      return;
+    }
+
+    // Otherwise we are either the caller (shouldn't receive offers) or
+    // the callee who HAS clicked Accept and has a PC. Process the offer
+    // immediately: set remote desc, create answer, send it.
     if (!Call.state.pc) {
+      // Defensive: shouldn't happen, but if it does, create the PC now.
       if (!Call.state.localStream) {
         try { Call.state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
         catch (e) { App.wsSend({ type: 'call_reject', callId: msg.callId }); return; }
       }
       await createPeerConnection();
       Call.state.localStream.getTracks().forEach(t => Call.state.pc.addTrack(t, Call.state.localStream));
+      flushPendingIce();
     }
     try {
       await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
@@ -243,6 +337,10 @@
   // ==========================================================
   Call.acceptIncoming = async function () {
     if (!Call.state.callId) return;
+    // Pre-create the audio element so it's in the DOM and ready when
+    // the remote track arrives (also counts as "user gesture" context
+    // for autoplay purposes since this runs from the Accept click).
+    ensureAudioElement();
     try {
       Call.state.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
@@ -251,12 +349,32 @@
       endCall('rejected');
       return;
     }
+    Call.state.accepted = true;       // mark BEFORE creating PC so the offer handler knows
     await createPeerConnection();
     Call.state.localStream.getTracks().forEach(t => Call.state.pc.addTrack(t, Call.state.localStream));
-    // If we already received an offer, it's set; else wait for offer
-    setState('In call');
-    // The caller will receive our accept implicitly when we send the answer
-    // (server may want an explicit accept — we just rely on the offer flow.)
+    // Apply any ICE candidates that arrived while we were setting up.
+    flushPendingIce();
+
+    // If we already received the offer (it was buffered in pendingOffer),
+    // process it now: set remote desc, create answer, send it.
+    if (Call.state.pendingOffer) {
+      const msg = Call.state.pendingOffer;
+      Call.state.pendingOffer = null;
+      try {
+        await Call.state.pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+        const ans = await Call.state.pc.createAnswer();
+        await Call.state.pc.setLocalDescription(ans);
+        App.wsSend({ type: 'call_answer', callId: msg.callId, peerId: msg.fromUserId, sdp: ans });
+      } catch (e) {
+        App.toast('Failed to answer: ' + e.message, 'error');
+        endCall('ended');
+        return;
+      }
+    }
+    // If we haven't received the offer yet, the call_offer handler
+    // will pick it up when it arrives (because Call.state.accepted is
+    // true and Call.state.pc exists).
+    setState('Ringing…');
   };
 
   // ==========================================================
@@ -288,14 +406,21 @@
       try { Call.state.pc.close(); } catch {}
     }
     if (Call.state.audioEl) {
-      try { Call.state.audioEl.srcObject = null; } catch {}
+      try {
+        Call.state.audioEl.srcObject = null;
+        Call.state.audioEl.pause();
+      } catch {}
+      // Leave the audio element in the DOM — it'll be reused for the
+      // next call. Removing it can cause autoplay-policy issues on the
+      // next call because we lose the "user-initiated" gesture context.
     }
     if (Call.state.timerInterval) clearInterval(Call.state.timerInterval);
     Call.state = {
       callId: null, peerId: null, peerName: null, direction: null,
-      pc: null, localStream: null, remoteStream: null, audioEl: null,
+      pc: null, localStream: null, remoteStream: null,
+      audioEl: Call.state.audioEl,  // preserve the DOM-attached audio element
       timerStart: null, timerInterval: null, muted: false, speaker: true,
-      pendingOffer: null,
+      pendingOffer: null, pendingIce: [], accepted: false,
     };
   }
 
@@ -355,7 +480,15 @@
     if (spkBtn) spkBtn.onclick = () => {
       Call.state.speaker = !Call.state.speaker;
       if (Call.state.audioEl) {
-        try { Call.state.audioEl.volume = Call.state.speaker ? 1 : 0; } catch {}
+        try {
+          // Use muted instead of volume=0 — volume=0 can interact badly
+          // with autoplay-policy on some browsers, and a "muted=true"
+          // element can still be played (so we don't lose the play()
+          // permission) — we just toggle the mute flag.
+          Call.state.audioEl.muted = !Call.state.speaker;
+          // Try to resume playback in case it was paused.
+          if (Call.state.speaker) playRemoteAudio();
+        } catch {}
       }
       spkBtn.classList.toggle('on', Call.state.speaker);
       spkBtn.textContent = Call.state.speaker ? '🔊' : '🔈';

@@ -304,6 +304,15 @@
   // ==========================================================
   function onLocalChange(cm, change) {
     if (Editor.state.applyingRemote) return;
+    // Defensive: CodeMirror fires `change` events for our own remote
+    // edits with origin `+remote` (or whatever origin string we pass to
+    // replaceRange). If the applyingRemote flag was already reset by
+    // the time the change event fires (which can happen because the
+    // flag is set OUTSIDE cm.operation while change events fire
+    // INSIDE), we'd otherwise re-broadcast our own remote edits as if
+    // they were local — creating an infinite echo loop. Checking the
+    // origin is the bulletproof fix.
+    if (change && change.origin && change.origin === '+remote') return;
     // Build ops from change object
     // change.from, change.to, change.text (array of lines), change.removed (array)
     // We model as: delete from change.from..change.to, then insert change.text at change.from
@@ -418,11 +427,21 @@
     const from = cm.posFromIndex(msg.pos);
     const to = cm.posFromIndex(msg.selectionEnd || msg.pos);
     const name = (Editor.state.participants[userId] && Editor.state.participants[userId].name) || ('User ' + userId);
-    // Use a non-empty marker element if possible
+    // Use a non-empty marker element. Show the first 3 chars of the
+    // participant's name as the marker label (was previously broken —
+    // charAt(1) gave the second char, then slice(0,4) on a 1-char string
+    // returned only that one char).
+    const initials = (name || '?').slice(0, 3).toUpperCase();
     const el = document.createElement('span');
     el.className = 'cm-cursor-marker';
     el.style.color = color;
-    el.setAttribute('data-name', name.charAt(0).toUpperCase() + name.charAt(1).slice(0, 4));
+    el.style.background = color + '33';   // 20% alpha
+    el.style.padding = '0 2px';
+    el.style.borderRadius = '2px';
+    el.style.fontWeight = '700';
+    el.style.fontSize = '11px';
+    el.setAttribute('data-name', initials);
+    el.textContent = initials;
     try {
       Editor.state.cursorMarkers[userId] = cm.markText(from, to, {
         replacedWith: el,
